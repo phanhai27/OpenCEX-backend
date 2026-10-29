@@ -252,4 +252,62 @@ Tuyệt đối **KHÔNG nhồi nhét** các khái niệm phái sinh vào bảng 
 | **Cặp hợp đồng** | **THÊM MỚI** | Bảng mới `FuturesContract` | Cần các trường tham số đòn bẩy, tỷ lệ MMR, Mark Price và Funding Rate. |
 | **Lịch sử thanh lý & Funding** | **THÊM MỚI** | `LiquidationHistory`, `FundingRateHistory` | Kiểm toán nợ xấu, quỹ bảo hiểm và đối soát phí định kỳ mỗi 8 tiếng. |
 
+---
+
+### 6. Tóm Tắt Luồng Dữ Liệu & Phân Định Kết Nối Database Cho Sinh Viên
+
+Để đạt tốc độ xử lý hàng ngàn giao dịch/giây mà không bị nghẽn đĩa (I/O Bottleneck), hệ thống Long/Short được phân tách nghiêm ngặt thành **Nhóm có kết nối Database (Persistent Storage)** và **Nhóm chạy thuần túy trên RAM (In-Memory Engine)**:
+
+#### A. Sơ Đồ Luồng Dữ Liệu (Data Flow Diagram):
+
+```mermaid
+flowchart TD
+    Client["Client / Trader"]
+
+    subgraph API_Layer["1. Tầng API (CÓ DB)"]
+        View["views/futures.py\n(Đọc/Ghi DB: Kiểm tra & khóa số dư FuturesBalance)"]
+    end
+
+    subgraph Queue_Layer["2. Tầng Hàng Đợi (Redis/RabbitMQ)"]
+        Queue[("Queue: futures.orders.PAIR")]
+    end
+
+    subgraph Worker_Layer["3. Tầng Worker Khớp Lệnh"]
+        Worker["bin/futures_stack.py\n(CÓ DB: Chỉ đọc PostgreSQL lúc khởi động nạp RAM)"]
+    end
+
+    subgraph Engine_Layer["4. Tầng Matching Engine (KHÔNG DB - 100% RAM)"]
+        Engine["core/orderbook/futures_book.py\n(So khớp giá, tính PnL & Margin hoàn toàn trên RAM)"]
+    end
+
+    subgraph Async_Persistence["5. Tầng Lưu Trữ Bất Đồng Bộ (CÓ DB)"]
+        Tasks["core/tasks/futures.py\n(Ghi DB: Lưu Position, Liquidation, Funding, Transaction)"]
+    end
+
+    subgraph Realtime_WS["6. Tầng Realtime WebSocket (KHÔNG DB)"]
+        WS["exchange/futures_notifications.py\n(Chỉ dùng Redis Channels broadcast ra UI)"]
+    end
+
+    %% Luồng đi
+    Client -->|1. Gửi lệnh POST| View
+    View -->|2. Bắn sự kiện Task| Queue
+    Queue -->|3. Tiêu thụ lệnh tuần tự| Worker
+    Worker -->|4. Khớp lệnh tốc độ cao| Engine
+    Engine -->|5a. Phát sự kiện lưu trữ| Tasks
+    Engine -->|5b. Phát sự kiện Realtime| WS
+    WS -.->|6. Push PnL & nhịp giá| Client
+```
+
+#### B. Phân Định Trách Nhiệm Kết Nối Database Của Từng File:
+
+| File Mã Nguồn | Trạng Thái Kết Nối DB | Thời Điểm & Mục Đích Tương Tác Cơ Sở Dữ Liệu |
+| :--- | :---: | :--- |
+| **`core/views/futures.py`** | **CÓ KẾT NỐI DB** | - Khi đặt lệnh: Kiểm tra và khóa số dư ký quỹ ban đầu trong bảng `FuturesBalance`.<br>- Khi xem vị thế: Truy vấn bảng `Position` và `FuturesBalance`. |
+| **`bin/futures_stack.py`** | **CÓ KẾT NỐI DB** *(Chỉ lúc khởi động)* | - **Warm-up Cache**: Chỉ `SELECT` các vị thế và lệnh đang mở (`is_closed=False`) từ PostgreSQL lên RAM khi bật tiến trình. Sau đó ngắt kết nối thường trực để xử lý in-memory. |
+| **`core/tasks/futures.py`** | **CÓ KẾT NỐI DB** | - **Thanh lý**: Cập nhật `Position.is_closed=True`, lưu `LiquidationHistory` và trừ lỗ trong `Transaction`.<br>- **Funding Rate**: Tính phí 8h/lần, cấn trừ `FuturesBalance` và ghi `FundingRateHistory`. |
+| **`core/orderbook/futures_book.py`** | **KHÔNG KẾT NỐI DB** | - **100% In-Memory RAM**: Hoạt động thuần túy trên cấu trúc dữ liệu RAM (độ trễ micro-giây). Tránh I/O đĩa làm nghẽn tốc độ khớp lệnh của sàn. |
+| **`bots/futures_mm.py`** | **KHÔNG KẾT NỐI DB** | - Chỉ lấy giá tham chiếu từ Oracle/WebSocket, tính toán spread Bid/Ask và bắn lệnh vào API/Queue. |
+| **`exchange/futures_notifications.py`** | **KHÔNG KẾT NỐI DB** | - Chỉ làm việc với Redis Channel Layer (`channel_layer.group_send`) để phát tin realtime qua WebSocket. |
+
+
 
