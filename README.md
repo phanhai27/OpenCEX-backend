@@ -175,3 +175,81 @@ Khi phát triển tính năng Long/Short vào thực tế, bắt buộc phải g
 * **Bài toán 7: Lựa chọn Mô hình Ký Quỹ Ban Đầu (Isolated Margin Trước)**:
   * Khi mới phát triển, chỉ nên triển khai **Isolated Margin** (ký quỹ cô lập trên từng lệnh: cháy lệnh nào mất tiền lệnh đó). Chưa nên làm Cross Margin ngay để tránh rủi ro sụp đổ dây chuyền tài khoản.
 
+---
+
+### 5. Chiến Lược Cơ Sở Dữ Liệu (Database): Sửa Bảng Cũ Hay Thêm Bảng Mới?
+
+Khi mở rộng hệ thống từ Spot sang Long/Short, **chiến lược tối ưu là Mô Hình Kết Hợp (Hybrid Model)**: Sửa đổi tối thiểu ở các bảng kế toán dùng chung và Tạo mới hoàn toàn các bảng nghiệp vụ phái sinh độc lập.
+
+#### A. Các Bảng CŨ Cần Sửa (Modifications)
+Hệ thống cũ cần được bổ sung để hiểu được các dòng tiền và phân loại lệnh mới mà không làm vỡ logic Spot:
+
+1. **Bảng `Transaction` ([`core/models/inouts/transaction.py`](file:///home/apollai/Documents/GitHub/opencex/backend/core/models/inouts/transaction.py))**:
+   * **Cách sửa**: Bổ sung các hằng số enum `REASON_*` mới (không cần sửa cấu trúc schema bảng):
+     * `REASON_FUTURES_MARGIN_HOLD = 60`: Tạm giữ tiền ký quỹ khi mở lệnh Long/Short.
+     * `REASON_FUTURES_MARGIN_RELEASE = 61`: Hoàn trả ký quỹ khi đóng vị thế hoặc hủy lệnh.
+     * `REASON_FUTURES_REALIZED_PNL = 62`: Cộng/trừ tiền Lãi/Lỗ thực tế khi chốt vị thế.
+     * `REASON_FUTURES_FUNDING_FEE = 63`: Khấu trừ/cộng phí Funding Rate định kỳ mỗi 8h.
+     * `REASON_FUTURES_LIQUIDATION_LOSS = 64`: Trừ tiền lỗ khi vị thế bị cưỡng chế thanh lý.
+   * **Mục đích**: Giúp module kế toán tài sản ghi nhận vết tiền biến động rõ ràng.
+
+2. **Bảng `Order` ([`core/models/orders/__init__.py`](file:///home/apollai/Documents/GitHub/opencex/backend/core/models/orders/__init__.py))**:
+   * **Cách sửa**: Bổ sung các trường phái sinh (hoặc tách riêng thành `FuturesOrder`):
+     * `position_effect`: Phân biệt lệnh Mở vị thế (`OPEN`) hay Đóng vị thế (`CLOSE`).
+     * `leverage`: Mức đòn bẩy áp dụng cho lệnh (ví dụ: 10x, 20x, 50x).
+     * `margin_mode`: Chế độ ký quỹ (`ISOLATED` hoặc `CROSS`).
+     * `reduce_only`: Cờ chỉ cho phép giảm khối lượng vị thế, không cho mở thêm.
+
+---
+
+#### B. Các Bảng MỚI Bắt Buộc Phải Thêm (New Tables)
+Tuyệt đối **KHÔNG nhồi nhét** các khái niệm phái sinh vào bảng dữ liệu Spot, bắt buộc phải tạo mới 5 bảng sau:
+
+1. **Bảng `FuturesBalance` (Ví Ký Quỹ Phái Sinh)**:
+   * **Tại sao không dùng chung bảng `Balance` của Spot?**
+     * *Lý do an toàn sống còn*: Nếu dùng chung ví, khi người dùng bị cháy một lệnh Futures x50, Liquidation Engine có thể quét sạch toàn bộ Bitcoin và USDT người dùng đang lưu trữ ở ví Spot.
+     * *Cấu trúc trường*: `user_id`, `currency`, `wallet_balance` (số dư ví Futures), `margin_locked` (ký quỹ đang bị khóa trong vị thế và lệnh chờ).
+     * *Quy trình*: Người dùng muốn đánh Long/Short phải bấm "Chuyển tiền" (Internal Transfer) từ ví Spot sang ví Futures.
+
+2. **Bảng `Position` (Bảng Quản Lý Vị Thế - Cốt Lõi Nhất)**:
+   * **Tại sao không thể dùng bảng `Order` cũ?**
+     * Trong Spot, sau khi khớp lệnh là xong (`Order` đóng). Nhưng trong Futures, sau khi khớp lệnh thì **bắt đầu sinh ra một Vị thế (Position) tồn tại theo thời gian thực** chịu ảnh hưởng của giá thị trường.
+     * *Cấu trúc trường*:
+       * `user_id`, `pair`: Tài khoản và cặp hợp đồng (VD: `BTC-USDT-PERP`).
+       * `side`: Chiều vị thế (`LONG` hoặc `SHORT`).
+       * `size`: Khối lượng hợp đồng đang nắm giữ.
+       * `entry_price`: Giá vào lệnh trung bình.
+       * `initial_margin`: Số tiền ký quỹ gốc bỏ ra.
+       * `leverage`, `margin_mode`: Mức đòn bẩy và chế độ ký quỹ.
+       * `liquidation_price`: Giá thanh lý ước tính.
+       * `is_closed`: Trạng thái vị thế (Đang mở hay Đã đóng).
+       * `version`: **Khóa lạc quan (Optimistic Lock)** chống Race Condition / Double Settlement.
+
+3. **Bảng `FuturesContract` / `FuturesPair` (Đặc Tả Cặp Hợp Đồng)**:
+   * Tách riêng khỏi bảng `Pair` của Spot để quản lý các tham số phái sinh đặc thù:
+     * `code`: Tên hợp đồng (VD: `BTC-USDT-PERP`).
+     * `max_leverage`: Đòn bẩy tối đa cho phép (VD: BTC cho 100x, Altcoin cho 20x).
+     * `maintenance_margin_rate` (MMR): Tỷ lệ ký quỹ duy trì tối thiểu (VD: 0.5%).
+     * `mark_price` & `index_price`: Giá tham chiếu cập nhật từ Oracle bên ngoài.
+     * `funding_rate` & `next_funding_time`: Tỷ lệ và thời điểm thanh toán funding.
+
+4. **Bảng `LiquidationHistory` (Lịch Sử Thanh Lý & Quỹ Bảo Hiểm)**:
+   * Lưu lại chi tiết từng vụ cháy tài khoản: vị thế bị đóng ở giá nào, khoản lỗ thực tế, số tiền thu về Quỹ bảo hiểm (`Insurance Fund`), hoặc mức lỗ thâm hụt (Bad Debt) mà sàn phải gánh.
+
+5. **Bảng `FundingRateHistory` (Lịch Sử Phí Funding)**:
+   * Lưu lịch sử trả phí mỗi 8 tiếng: cặp hợp đồng, tỷ lệ funding, thời gian, tổng tiền phe Long trả cho phe Short (hoặc ngược lại).
+
+---
+
+#### C. Bảng So Sánh Nhanh: Sửa Cũ vs Thêm Mới
+
+| Thực Thể Dữ Liệu | Chiến Lược | Vị Trí / Bảng | Lý Do Kiến Trúc |
+| :--- | :---: | :--- | :--- |
+| **Mã lý do giao dịch** | **SỬA CŨ** | `core/models/inouts/transaction.py` | Tái sử dụng bảng `Transaction` hiện có để ghi nhận lịch sử dòng tiền thống nhất. |
+| **Lệnh đặt Mua/Bán** | **SỬA CŨ** | `core/models/orders/__init__.py` | Bổ sung các cờ phái sinh (`leverage`, `position_effect`) vào model lệnh. |
+| **Ví tiền người dùng** | **THÊM MỚI** | Bảng mới `FuturesBalance` | **Bắt buộc cô lập ví**: Bảo vệ tài sản ví Spot không bị thanh lý chéo khi cháy Futures. |
+| **Vị thế Long/Short** | **THÊM MỚI** | Bảng mới `Position` | Spot không có khái niệm vị thế duy trì theo thời gian thực; bắt buộc phải có bảng riêng. |
+| **Cặp hợp đồng** | **THÊM MỚI** | Bảng mới `FuturesContract` | Cần các trường tham số đòn bẩy, tỷ lệ MMR, Mark Price và Funding Rate. |
+| **Lịch sử thanh lý & Funding** | **THÊM MỚI** | `LiquidationHistory`, `FundingRateHistory` | Kiểm toán nợ xấu, quỹ bảo hiểm và đối soát phí định kỳ mỗi 8 tiếng. |
+
+
