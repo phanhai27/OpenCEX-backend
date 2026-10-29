@@ -17,6 +17,8 @@ router = DefaultRouter()
 router.register(r'orders', OrdersView, basename='order')
 
 
+from core.views.futures import FuturesOrdersView, FuturesPositionsView
+
 urlpatterns = [
     url(r'pairs/?$', PairsListView.as_view()),
     url(r'stack/(?P<pair>[a-zA-Z-]+)/$', StackView.as_view()),
@@ -30,6 +32,9 @@ urlpatterns = [
     url(r'exchange/send_email/$', ExchangeEmailView.as_view()),
     url(r'allorders/$', AllOrdersView.as_view()),
     url(r'latest_candle/$', LatestCandleView.as_view()),
+    # Futures API Endpoints
+    url(r'futures/orders/?$', FuturesOrdersView.as_view()),
+    url(r'futures/positions/?$', FuturesPositionsView.as_view()),
 ]
 
 urlpatterns.extend(router.urls)

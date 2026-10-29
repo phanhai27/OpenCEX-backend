@@ -144,9 +144,26 @@ class LiveNotificationsConsumer(AsyncJsonWebsocketConsumer):
             data = {'data': 'pong'}
             await self.send_json(data)
 
+        # Futures Realtime Channels (Public)
+        elif command == 'add_futures_mark_price':
+            pair = params.get('pair', 'BTC-USDT-PERP')
+            await self.join_group(f"futures_mark_price_{pair}")
+        elif command == 'del_futures_mark_price':
+            pair = params.get('pair', 'BTC-USDT-PERP')
+            await self.leave_group(f"futures_mark_price_{pair}")
+
+        elif command == 'add_futures_liquidations':
+            await self.join_group("futures_public_liquidations")
+        elif command == 'del_futures_liquidations':
+            await self.leave_group("futures_public_liquidations")
+
         # for authorized users
         user = self.scope['user']
         if user and getattr(user, 'id'):
+            if command == 'add_futures_positions':
+                await self.join_group(f"user_positions_{user.id}")
+            elif command == 'del_futures_positions':
+                await self.leave_group(f"user_positions_{user.id}")
             # if command == 'add_profile':
             #     await self.join_group(profile_notificator.gen_channel(**params))
             #     data = await sync_to_async(profile_notificator.get_data)(**params)

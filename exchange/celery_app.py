@@ -444,3 +444,34 @@ if is_section_enabled('stop_limits'):
         },
     }),
     app.conf.task_queues += (Queue('stop_limits'),)
+
+if is_section_enabled('futures'):
+    app.conf.beat_schedule.update({
+        'futures_funding_settlement': {
+            'task': 'core.tasks.futures.settle_funding_rate',
+            'schedule': crontab(minute=0, hour='*/8'),
+            'options': {
+                'queue': 'futures_funding',
+            }
+        },
+        'futures_oracle_mark_price': {
+            'task': 'core.tasks.futures.update_mark_price',
+            'schedule': 3.0,
+            'options': {
+                'queue': 'default',
+            }
+        }
+    })
+    app.conf.task_routes.update({
+        'core.tasks.futures.check_liquidations': {
+            'queue': 'futures_liquidation',
+        },
+        'core.tasks.futures.settle_funding_rate': {
+            'queue': 'futures_funding',
+        },
+    })
+    app.conf.task_queues += (
+        Queue('futures_liquidation'),
+        Queue('futures_funding'),
+    )
+
